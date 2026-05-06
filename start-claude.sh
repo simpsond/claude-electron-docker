@@ -49,6 +49,9 @@ fi
 #   would otherwise hang on token storage.
 # --disable-gpu, --use-gl=swiftshader: no GPU; software rendering.
 # --disable-dev-shm-usage: belt-and-suspenders alongside compose shm_size=1g.
+# Note: --remote-debugging-port is not passed. The app's main process
+# inspects argv and exits 1 if a remote-debugging flag is present without
+# a valid CLAUDE_CDP_AUTH token. See DESIGN.md Section 4.
 exec claude-desktop \
     --no-sandbox \
     --password-store=basic \

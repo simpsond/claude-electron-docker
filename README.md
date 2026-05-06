@@ -30,6 +30,8 @@ ssh -L 5901:localhost:5901 user@docker-host
 
 Do not change the port binding to `0.0.0.0`. The VNC server runs without authentication; direct exposure would let anyone with network access drive a logged-in Claude session.
 
+Note: Claude Desktop blocks `--remote-debugging-port` at startup (Anthropic-signed token required). Automated harness access uses the upstream-documented runtime workaround instead — `SIGUSR1` to the main process opens the Node inspector on port 9229. See `DESIGN.md` Section 4.
+
 ## Triage
 
 Per-daemon logs are written to `/tmp/` inside the container:
