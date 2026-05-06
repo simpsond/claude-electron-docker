@@ -215,7 +215,7 @@ Tells the supervisor which daemons to run and in what order. Each daemon is its 
 - **`xvfb`** (`priority=100`) — starts the fake screen with the exact command `Xvfb :0 -screen 0 1440x900x24 -dpi 96 -nolisten tcp`. Display `:0`, geometry `1440x900x24`, DPI 96, no TCP listener. Every graphical thing depends on this being up. The geometry and depth are committed numbers: 1440x900 is generous enough for the Claude window without making VNC bandwidth painful, 24-bit color matches what the app expects, and 96 DPI is what produces correctly-scaled text in Electron apps. `-nolisten tcp` because we have no use for X-over-TCP and exposing it would be a needless attack surface.
 - **`dbus`** (`priority=200`) — starts a session DBus daemon with the exact command `dbus-daemon --session --nofork --address=unix:path=/tmp/dbus-session-bus`. `--session` gives us a session bus rather than a system bus; `--nofork` keeps the daemon in the foreground so supervisord can track it; `--address` commits the socket path explicitly rather than letting the daemon pick a transient one. `start-claude.sh` exports the matching `DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/dbus-session-bus`; both files name the same exact path so the dependency cannot drift silently.
 - **`fluxbox`** (`priority=300`) — starts the window manager with the exact command `fluxbox` and `DISPLAY=:0` exported in the program's environment. No fluxbox configuration file is shipped — defaults are fine for our single-window use case.
-- **`x11vnc`** (`priority=400`) — starts the VNC server with the exact command `x11vnc -display :0 -forever -shared -rfbport 5901 -nopw -xkb -clipboard -noxdamage`. `-display :0` points at our Xvfb screen. `-forever` keeps the server up across client disconnects. `-shared` allows multiple clients (rare but useful for "one engineer triaging while another watches"). `-rfbport 5901` overrides x11vnc's default `5900 + display_number` convention, which would otherwise put us on 5900 for display `:0` and miss our compose port map. `-nopw` for no password (acceptable because the host-side port binding is `127.0.0.1` only). `-xkb` and `-clipboard` for keyboard layout fidelity and clipboard sync. `-noxdamage` because XDAMAGE under Xvfb has been a flake source historically and we do not need its bandwidth optimizations.
+- **`x11vnc`** (`priority=400`) — starts the VNC server with the exact command `x11vnc -display :0 -forever -shared -rfbport 5901 -nopw -xkb -noxdamage`. `-display :0` points at our Xvfb screen. `-forever` keeps the server up across client disconnects. `-shared` allows multiple clients (rare but useful for "one engineer triaging while another watches"). `-rfbport 5901` overrides x11vnc's default `5900 + display_number` convention, which would otherwise put us on 5900 for display `:0` and miss our compose port map. `-nopw` for no password (acceptable because the host-side port binding is `127.0.0.1` only). `-xkb` for keyboard layout fidelity. PRIMARY/CLIPBOARD selection sync is on by default in x11vnc 0.9.16 (the version that ships in bookworm); there is no `-clipboard` flag to enable it explicitly, and passing one causes x11vnc to exit with `unrecognized option`. The `xclip` package we install is what actually moves selection text between the X server and the application clipboard. `-noxdamage` because XDAMAGE under Xvfb has been a flake source historically and we do not need its bandwidth optimizations.
 - **`claude-desktop`** (`priority=500`) — runs `/usr/local/bin/start-claude.sh`. Last to start; depends on Xvfb, DBus, and fluxbox being up.
 
 Supervisord starts programs in ascending priority order but does **not** wait for readiness before launching the next program. The Claude wrapper script handles that gap by polling X and DBus before launching the app.
@@ -498,7 +498,7 @@ loglevel=info
 user=root
 
 [rpcinterface:supervisor]
-supervisor.rpcinterface_factory = supervisor.rpcinterface.make_main_rpcinterface
+supervisor.rpcinterface_factory = supervisor.rpcinterface:make_main_rpcinterface
 
 [supervisorctl]
 serverurl=unix:///var/run/supervisor.sock
@@ -543,7 +543,7 @@ stderr_logfile_maxbytes=0
 
 [program:x11vnc]
 priority=400
-command=/usr/bin/x11vnc -display :0 -forever -shared -rfbport 5901 -nopw -xkb -clipboard -noxdamage
+command=/usr/bin/x11vnc -display :0 -forever -shared -rfbport 5901 -nopw -xkb -noxdamage
 autorestart=true
 startretries=3
 startsecs=2
