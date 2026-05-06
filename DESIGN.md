@@ -237,7 +237,7 @@ It does, in order:
 - Exports `DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/dbus-session-bus`. This value must match the socket path used by the `dbus` supervisord program; both files commit the same exact path in writing, so they cannot drift apart by accident.
 - Polls the X server with `xdpyinfo -display :0` in a loop, sleeping 0.5 seconds between attempts, with a hard ceiling of 30 seconds. If `xdpyinfo` does not return success within 30 seconds the script exits non-zero and supervisord records the failure. This is the "wait until Xvfb is really up" step that supervisord's priority ordering does not give us by itself.
 - Polls the session DBus daemon with `dbus-send --session --dest=org.freedesktop.DBus --type=method_call --print-reply / org.freedesktop.DBus.Peer.Ping`, also at 0.5-second intervals with a 30-second ceiling. The socket file existing is not the same as the daemon being ready to accept connections; on a slow host Electron will race DBus startup and either crash or behave erratically without this check.
-- Registers the Chromium launcher (the wrapper described in the Dockerfile section, not the system `chromium.desktop`) as the system default browser via `xdg-settings set default-web-browser chromium-launcher.desktop`. This ensures that when Claude Desktop hands off the OAuth login URL, the browser that opens is the one configured to run cleanly as root in our container.
+- Registers the Chromium launcher (the wrapper described in the Dockerfile section, not the system `chromium.desktop`) as the system default browser via `xdg-settings set default-web-browser chromium-launcher.desktop`. This ensures that when Claude Desktop hands off the OAuth login URL, the browser that opens is the one configured to run cleanly as root in our container. The call is wrapped in an `if ! …; then echo WARNING …` guard so that a non-zero exit (xdg-settings' verification step occasionally trips on unexpected `.config` state) logs loudly but does not abort the script under `set -eu` — the app is still usable for non-OAuth flows, and a hard failure here would silently crash-loop the program.
 - Execs `claude-desktop --no-sandbox --password-store=basic`. We assume the aaddrick `.deb` installs the binary as `claude-desktop` on `PATH` — that is the standard install layout for the upstream package. If a future upstream change renames the binary, the wrapper updates here. `--no-sandbox` is necessary because Chromium's built-in sandbox does not work cleanly in this container shape (the container itself is the isolation boundary, per Section 1). `--password-store=basic` is necessary because Electron will otherwise try to use libsecret for credential storage; with `libsecret-1-0` installed but no functioning DBus secret service (no gnome-keyring, no kwallet, no `pass`), Electron will hang or error during token storage. Both flags address standard Electron-in-container gotchas.
 
 Comments at the top of the file explain why each step exists, in the same spirit as the Dockerfile.
@@ -606,8 +606,12 @@ done
 
 # Register our container-safe Chromium launcher (not the system Chromium) as
 # the default browser. This is what Claude Desktop's xdg-open call invokes
-# during the OAuth login flow.
-xdg-settings set default-web-browser chromium-launcher.desktop
+# during the OAuth login flow. Tolerate non-zero exit under `set -eu`: a
+# verification failure here should log loudly but not prevent Claude from
+# launching, since the app is still usable for non-OAuth flows.
+if ! xdg-settings set default-web-browser chromium-launcher.desktop; then
+    echo "WARNING: xdg-settings failed to set default browser; OAuth handoff may not work" >&2
+fi
 
 # Hand off to Claude Desktop with the full container-safe flag set.
 # --no-sandbox: container is the isolation boundary; Chromium's sandbox

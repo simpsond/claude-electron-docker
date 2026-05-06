@@ -35,8 +35,12 @@ done
 
 # Register our container-safe Chromium launcher (not the system Chromium) as
 # the default browser. This is what Claude Desktop's xdg-open call invokes
-# during the OAuth login flow.
-xdg-settings set default-web-browser chromium-launcher.desktop
+# during the OAuth login flow. Tolerate non-zero exit under `set -eu`: a
+# verification failure here should log loudly but not prevent Claude from
+# launching, since the app is still usable for non-OAuth flows.
+if ! xdg-settings set default-web-browser chromium-launcher.desktop; then
+    echo "WARNING: xdg-settings failed to set default browser; OAuth handoff may not work" >&2
+fi
 
 # Hand off to Claude Desktop with the full container-safe flag set.
 # --no-sandbox: container is the isolation boundary; Chromium's sandbox
