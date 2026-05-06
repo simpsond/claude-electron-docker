@@ -57,7 +57,7 @@ The complication is that Claude Desktop is a graphical app. It expects a screen,
 
 **A VNC server** (`x11vnc`). Watches the fake screen and streams a live picture of it over the network. A VNC client running on the engineer's Mac connects to that stream, shows them what the fake screen would have shown if it had been real, and forwards their mouse and keyboard back into the container.
 
-**A web browser inside the container** (Chromium). When the user clicks "log in" inside Claude Desktop, the app hands the OAuth flow off to whatever the system has registered as the default browser. The container needs an actual browser available to receive that hand-off. Without one, the login button does nothing visible.
+**A web browser inside the container** (Google Chrome). When the user clicks "log in" inside Claude Desktop, the app hands the OAuth flow off to whatever the system has registered as the default browser. The container needs an actual browser available to receive that hand-off. Without one, the login button does nothing visible.
 
 **A clipboard bridge** (`xclip`, plus the right flag on the VNC server). When the engineer pastes an email address or a 2FA code from their Mac into the VNC window, the text needs to travel through the VNC protocol and land in Claude Desktop's input field. This is the small piece of plumbing that makes that work. Without it, characters have to be typed by hand through the VNC keystroke channel, which is slow and error-prone.
 
@@ -76,7 +76,7 @@ When the container starts:
 5. It starts the VNC server, pointed at the fake screen, with clipboard sharing enabled.
 6. It starts Claude Desktop, which draws its window onto the fake screen.
 
-At this point the container is sitting there with Claude Desktop running on a screen no human has yet seen. One port — 5901 — is exposed to the host. An engineer opens a VNC client on their Mac, connects to `localhost:5901`, and sees the Claude Desktop window. They click "log in," Chromium opens inside the container to handle the OAuth redirect, they finish logging in, and they start using the app.
+At this point the container is sitting there with Claude Desktop running on a screen no human has yet seen. One port — 5901 — is exposed to the host. An engineer opens a VNC client on their Mac, connects to `localhost:5901`, and sees the Claude Desktop window. They click "log in," Chrome opens inside the container to handle the OAuth redirect, they finish logging in, and they start using the app.
 
 When they are done, `docker compose down` discards the container. Because we are not persisting anything to disk, the next run starts from scratch — no leftover login session, no cached settings, no surprises carried over from the last run.
 
@@ -147,39 +147,46 @@ Eight files, in one directory, with no subdirectories, no submodules, no generat
 
 The recipe that produces the container image. In order:
 
-- Starts from `debian:bookworm-slim`, pinned to `linux/amd64` via `FROM --platform=linux/amd64`. Debian rather than Alpine because Electron apps depend on glibc, and Alpine uses musl. The slim variant rather than the full Debian image because we want a small starting point and will install only what we need. The platform pin exists because the aaddrick port ships an amd64 `.deb`; on Apple Silicon hosts the image will run under Docker Desktop's amd64 emulation, with a performance hit we are explicitly accepting (see Section 4).
+- Starts from `ubuntu:22.04`, pinned to `linux/amd64` via `FROM --platform=linux/amd64`. Ubuntu LTS because Electron apps depend on glibc (Alpine's musl is out), and 22.04 specifically because the rest of our test platform's container fleet runs on Jammy LTS — keeping the base aligned avoids a class of "works for me" surprises during the eventual harness migration. The platform pin exists because the aaddrick port ships an amd64 `.deb`; on Apple Silicon hosts the image will run under Docker Desktop's amd64 emulation, with a performance hit we are explicitly accepting (see Section 4).
 - Installs system packages with `apt-get install --no-install-recommends` and removes `/var/lib/apt/lists/` in the same `RUN` layer, so the image stays close to the slim baseline that we picked the slim image for in the first place. The packages fall into clearly commented groups so that a future engineer reading the Dockerfile can see at a glance which packages serve which purpose:
   - **Headless display stack** — `xvfb`, `fluxbox`, `x11vnc`. Provides the fake screen, the window manager, and the VNC server described in Section 1.
   - **Electron runtime dependencies** — the libraries the Electron binary will refuse to start without. We commit to an explicit set: `libgtk-3-0`, `libnss3`, `libasound2`, `libasound2-plugins`, `libxshmfence1`, `libgbm1`, `libdrm2`, `libxkbfile1`, `libsecret-1-0`, `libxss1`, `libxtst6`. The `.deb` we install will declare some of these as apt dependencies; listing them explicitly is a safety net. `libasound2-plugins` is included so we can route ALSA's default device to a `null` PCM via `/etc/asound.conf` (written by the Dockerfile), so Electron's audio probe finds a "device" and stops emitting errors. PulseAudio is deliberately not installed — without `libpulse.so` available, Electron's PA probe fails fast at `dlopen` rather than hanging.
-  - **The OAuth handoff browser** — `chromium` plus `xdg-utils`. Required because Claude Desktop's login flow opens the OAuth URL in the system default browser; without an actual browser present, the login button does nothing visible. We cannot use the system Chromium `.desktop` file as-is: Chromium refuses to start as root without `--no-sandbox`, and there is no functioning DBus secret service in the container for it to use for credential storage. The Dockerfile creates a small wrapper at `/usr/local/bin/chromium-launcher` and a corresponding `/usr/share/applications/chromium-launcher.desktop` entry, both inlined via heredoc. The exact contents:
+  - **OAuth handoff browser support** — `xdg-utils` and `gnupg` here; Google Chrome itself is installed in a separate `RUN` block from Google's official apt repo (described below). Ubuntu's `apt install chromium` is a snap-redirect stub that fails inside Docker because snapd isn't running, so a real `.deb`-shipping browser is required, and Chrome is the most reputable option that fits. The browser is required because Claude Desktop's login flow opens the OAuth URL in the system default browser; without an actual browser present, the login button does nothing visible. We cannot use Chrome's stock `.desktop` file as-is: Chrome refuses to start as root without `--no-sandbox`, and there is no functioning DBus secret service in the container for it to use for credential storage. The Dockerfile creates a small wrapper at `/usr/local/bin/chrome-launcher` and a corresponding `/usr/share/applications/chrome-launcher.desktop` entry, both inlined via heredoc. The exact contents:
 
-    Wrapper script (`/usr/local/bin/chromium-launcher`, `chmod +x`):
+    Wrapper script (`/usr/local/bin/chrome-launcher`, `chmod +x`):
 
     ```sh
     #!/bin/sh
-    exec /usr/bin/chromium --no-sandbox --password-store=basic "$@"
+    exec /usr/bin/google-chrome-stable \
+        --no-sandbox \
+        --password-store=basic \
+        --disable-gpu \
+        --use-gl=swiftshader \
+        --disable-dev-shm-usage \
+        "$@"
     ```
 
-    Desktop entry (`/usr/share/applications/chromium-launcher.desktop`):
+    Desktop entry (`/usr/share/applications/chrome-launcher.desktop`):
 
     ```ini
     [Desktop Entry]
     Version=1.0
     Type=Application
-    Name=Chromium (container-safe)
-    Exec=/usr/local/bin/chromium-launcher %U
+    Name=Google Chrome (container-safe)
+    Exec=/usr/local/bin/chrome-launcher %U
     Terminal=false
     Categories=Network;WebBrowser;
     MimeType=text/html;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
     ```
 
-    `start-claude.sh` registers this launcher (not the system Chromium) as the default browser at runtime via `xdg-settings`.
+    `start-claude.sh` registers this launcher (not the system Chrome `.desktop`) as the default browser at runtime via `xdg-settings`.
   - **The clipboard bridge** — `xclip`. Required because VNC's clipboard sync needs an X11-side helper to move text between the VNC channel and applications running on the fake screen.
   - **Fonts** — `fonts-liberation`, `fonts-noto-core`. Required because the slim base image ships almost no fonts and unlabelled UI renders as blank rectangles.
   - **Session bus** — the `dbus` package, providing `dbus-daemon`. Required because Electron apps quietly assume a session bus is present and behave erratically without one.
   - **Process supervisor** — `supervisor`.
   - **Locale** — `locales`. The slim base image ships only the C locale, which Electron's Intl machinery handles awkwardly. After installing the package, the Dockerfile runs `sed -i 's/^# *en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen && locale-gen` to enable and generate `en_US.UTF-8`, then sets both `ENV LANG=en_US.UTF-8` and `ENV LC_ALL=en_US.UTF-8` so every process started in the container inherits a fully-defined locale.
   - **Triage and readiness tools** — `procps`, `curl`, `xdotool`, `x11-utils`. Small conveniences that make `docker exec` debugging less painful when something goes wrong during bring-up. `x11-utils` specifically provides `xdpyinfo`, which `start-claude.sh` uses to poll for X readiness; `dbus-send` (used for the DBus readiness check) is already provided by the `dbus` package above.
+- Adds Google's apt repository and installs `google-chrome-stable`. The signing key is fetched from `https://dl.google.com/linux/linux_signing_key.pub`, dearmored into `/usr/share/keyrings/google-chrome.gpg`, and the source list at `/etc/apt/sources.list.d/google-chrome.list` uses `[arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg]` so that this key is scoped only to this single repo — a misissued key would not be trusted for any other apt source. After `apt-get install`, `command -v google-chrome-stable` runs as its own step so that a future Google rename of the binary fails the build at build time. The accepted-risk discussion of why we ship a third-party apt source and a proprietary binary is in Section 4.
 - Downloads, verifies, and installs the aaddrick `claude-desktop-debian` package. The Dockerfile pins two build arguments with concrete defaults filled in inline at first authoring:
   - `CLAUDE_DEB_URL` — the upstream tagged release artifact URL on the aaddrick GitHub releases page (of the form `https://github.com/aaddrick/claude-desktop-debian/releases/download/<tag>/<filename>.deb`). Pinned to a specific release tag, not a `latest` link, so the build is reproducible. The implementer fills the default in by visiting the releases page and copying the URL of the most recent stable release; a comment immediately above the `ARG` line records the upstream tag and the date it was pinned.
   - `CLAUDE_DEB_SHA256` — the expected SHA256 of that exact `.deb`. Computed once at first authoring with `curl -L "$CLAUDE_DEB_URL" | sha256sum` and pasted inline as the `ARG` default. Updating the URL means recomputing the SHA256 in the same change.
@@ -187,8 +194,8 @@ The recipe that produces the container image. In order:
   The install procedure is: `curl -fsSL "$CLAUDE_DEB_URL" -o /tmp/claude-desktop.deb`, then `echo "$CLAUDE_DEB_SHA256  /tmp/claude-desktop.deb" | sha256sum -c -` to verify the hash, then `apt-get update && apt-get install -y --no-install-recommends /tmp/claude-desktop.deb` to install. We use `apt-get install` against the local `.deb` rather than `dpkg -i` because the `.deb` declares apt dependencies that `dpkg` cannot resolve on its own; `apt-get install ./file.deb` resolves and installs those dependencies in the same step. After the install, the Dockerfile runs `command -v claude-desktop` as its own `RUN` step so that an upstream rename or layout change fails the build at build time rather than at first VNC. A mismatch on either the SHA256 or the binary-name check fails the build loudly before anything else proceeds.
 
   We do **not** include a fallback mirror in the PoC. A team-owned mirror would require an internal artifact storage decision (which GCS bucket, who owns it, who has write access to populate it) that is not in scope for this artifact and is not blocking for a single-developer PoC running on a Mac. If the upstream URL becomes unreachable during a build, the build fails loudly and the operator's recourse is to pin a different release. Adding a `CLAUDE_DEB_URL_FALLBACK` build arg is a small additive change to make later when ops designates a mirror, and is explicitly noted as a follow-on in Section 4.
-- Sets `ENV HOME=/root`. supervisord under root does not reliably propagate `HOME` to child programs, and Electron, Chromium, and `xdg-settings` all break in confusing ways without `HOME`. Setting it at the image level establishes a baseline that every process inherits.
-- Copies `supervisord.conf` to `/etc/supervisor/supervisord.conf`, **overwriting** the stock Debian top-level config rather than dropping a fragment into `/etc/supervisor/conf.d/`. This makes our config self-contained: the CMD's path reference is unambiguous, and we do not rely on the stock config's `conf.d/*.conf` include behavior. Copies `start-claude.sh` to `/usr/local/bin/start-claude.sh` and the Chromium wrapper described above to `/usr/local/bin/chromium-launcher`; both get `chmod +x`. Copies the `.desktop` entry to `/usr/share/applications/chromium-launcher.desktop`.
+- Sets `ENV HOME=/root`. supervisord under root does not reliably propagate `HOME` to child programs, and Electron, Chrome, and `xdg-settings` all break in confusing ways without `HOME`. Setting it at the image level establishes a baseline that every process inherits.
+- Copies `supervisord.conf` to `/etc/supervisor/supervisord.conf`, **overwriting** the stock top-level config rather than dropping a fragment into `/etc/supervisor/conf.d/`. This makes our config self-contained: the CMD's path reference is unambiguous, and we do not rely on the stock config's `conf.d/*.conf` include behavior. Copies `start-claude.sh` to `/usr/local/bin/start-claude.sh`; the Chrome launcher wrapper at `/usr/local/bin/chrome-launcher` and the corresponding `/usr/share/applications/chrome-launcher.desktop` are written by the Dockerfile heredocs above (not COPY'd in from the build context).
 - Exposes port 5901 (VNC).
 - Sets the container's `CMD` to `["/usr/bin/supervisord", "-n", "-c", "/etc/supervisor/supervisord.conf"]`. `-n` keeps supervisord in the foreground (otherwise it daemonizes and the container exits); `-c` points at the configuration file we copied in. Combined with `init: true` in compose, this puts tini at PID 1 and supervisord at PID 2 — supervisord is the conceptual "long-lived process the container is built around," even if not literally PID 1.
 
@@ -202,7 +209,7 @@ The service definition. It does very little, deliberately:
 - Maps port 5901 from the container to `127.0.0.1:5901` on the host. Localhost-only on purpose — VNC without a password should never be reachable from anywhere but the host the container is running on. Anyone wanting to reach it from another machine should use an SSH tunnel, as documented in the README.
 - Sets `shm_size: 1g`, because Chromium's renderer process inside Electron will crash with the default 64 megabytes of `/dev/shm`.
 - Sets `init: true`. Docker provides `tini` as PID 1 inside the container, with supervisord running underneath it. tini handles SIGTERM forwarding and zombie reaping cleanly, which removes a class of "weird shutdown" bugs that supervisord-as-PID-1 is known to cause. The cost is one line of compose configuration; we are paying it.
-- Sets `mem_limit: 4g`. Electron with Chromium loaded plus Claude Desktop's renderer can comfortably use two gigabytes; on Docker Desktop for Mac, an unbounded container can grind the host VM. The four-gigabyte cap is generous enough to accommodate the app under normal usage including a Chromium-mediated login flow, and small enough to fail fast if the app starts leaking. The number is empirical rather than principled; it is one line to change if it turns out to be too tight or too loose.
+- Sets `mem_limit: 4g`. Electron with Chromium loaded plus Claude Desktop's renderer can comfortably use two gigabytes; on Docker Desktop for Mac, an unbounded container can grind the host VM. The four-gigabyte cap is generous enough to accommodate the app under normal usage including a Chrome-mediated login flow, and small enough to fail fast if the app starts leaking. The number is empirical rather than principled; it is one line to change if it turns out to be too tight or too loose.
 - Mounts no volumes. Hermetic per-run state is a goal of this PoC, and a persistent config volume would work directly against that.
 - Sets no environment variables. The fake-screen geometry and the VNC port are baked into the image at sensible defaults; nothing about the running container needs compose-time configuration for the PoC to work.
 
@@ -215,7 +222,7 @@ Tells the supervisor which daemons to run and in what order. Each daemon is its 
 - **`xvfb`** (`priority=100`) — starts the fake screen with the exact command `Xvfb :0 -screen 0 1440x900x24 -dpi 96 -nolisten tcp`. Display `:0`, geometry `1440x900x24`, DPI 96, no TCP listener. Every graphical thing depends on this being up. The geometry and depth are committed numbers: 1440x900 is generous enough for the Claude window without making VNC bandwidth painful, 24-bit color matches what the app expects, and 96 DPI is what produces correctly-scaled text in Electron apps. `-nolisten tcp` because we have no use for X-over-TCP and exposing it would be a needless attack surface.
 - **`dbus`** (`priority=200`) — starts a session DBus daemon with the exact command `dbus-daemon --session --nofork --address=unix:path=/tmp/dbus-session-bus`. `--session` gives us a session bus rather than a system bus; `--nofork` keeps the daemon in the foreground so supervisord can track it; `--address` commits the socket path explicitly rather than letting the daemon pick a transient one. `start-claude.sh` exports the matching `DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/dbus-session-bus`; both files name the same exact path so the dependency cannot drift silently.
 - **`fluxbox`** (`priority=300`) — starts the window manager with the exact command `fluxbox` and `DISPLAY=:0` exported in the program's environment. No fluxbox configuration file is shipped — defaults are fine for our single-window use case.
-- **`x11vnc`** (`priority=400`) — starts the VNC server with the exact command `x11vnc -display :0 -forever -shared -rfbport 5901 -nopw -xkb -noxdamage`. `-display :0` points at our Xvfb screen. `-forever` keeps the server up across client disconnects. `-shared` allows multiple clients (rare but useful for "one engineer triaging while another watches"). `-rfbport 5901` overrides x11vnc's default `5900 + display_number` convention, which would otherwise put us on 5900 for display `:0` and miss our compose port map. `-nopw` for no password (acceptable because the host-side port binding is `127.0.0.1` only). `-xkb` for keyboard layout fidelity. PRIMARY/CLIPBOARD selection sync is on by default in x11vnc 0.9.16 (the version that ships in bookworm); there is no `-clipboard` flag to enable it explicitly, and passing one causes x11vnc to exit with `unrecognized option`. The `xclip` package we install is what actually moves selection text between the X server and the application clipboard. `-noxdamage` because XDAMAGE under Xvfb has been a flake source historically and we do not need its bandwidth optimizations.
+- **`x11vnc`** (`priority=400`) — starts the VNC server with the exact command `x11vnc -display :0 -forever -shared -rfbport 5901 -nopw -xkb -noxdamage`. `-display :0` points at our Xvfb screen. `-forever` keeps the server up across client disconnects. `-shared` allows multiple clients (rare but useful for "one engineer triaging while another watches"). `-rfbport 5901` overrides x11vnc's default `5900 + display_number` convention, which would otherwise put us on 5900 for display `:0` and miss our compose port map. `-nopw` for no password (acceptable because the host-side port binding is `127.0.0.1` only). `-xkb` for keyboard layout fidelity. PRIMARY/CLIPBOARD selection sync is on by default in x11vnc 0.9.16 (the version Ubuntu 22.04 ships); there is no `-clipboard` flag to enable it explicitly, and passing one causes x11vnc to exit with `unrecognized option`. The `xclip` package we install is what actually moves selection text between the X server and the application clipboard. `-noxdamage` because XDAMAGE under Xvfb has been a flake source historically and we do not need its bandwidth optimizations.
 - **`claude-desktop`** (`priority=500`) — runs `/usr/local/bin/start-claude.sh`. Last to start; depends on Xvfb, DBus, and fluxbox being up.
 
 Supervisord starts programs in ascending priority order but does **not** wait for readiness before launching the next program. The Claude wrapper script handles that gap by polling X and DBus before launching the app.
@@ -237,7 +244,7 @@ It does, in order:
 - Exports `DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/dbus-session-bus`. This value must match the socket path used by the `dbus` supervisord program; both files commit the same exact path in writing, so they cannot drift apart by accident.
 - Polls the X server with `xdpyinfo -display :0` in a loop, sleeping 0.5 seconds between attempts, with a hard ceiling of 30 seconds. If `xdpyinfo` does not return success within 30 seconds the script exits non-zero and supervisord records the failure. This is the "wait until Xvfb is really up" step that supervisord's priority ordering does not give us by itself.
 - Polls the session DBus daemon with `dbus-send --session --dest=org.freedesktop.DBus --type=method_call --print-reply / org.freedesktop.DBus.Peer.Ping`, also at 0.5-second intervals with a 30-second ceiling. The socket file existing is not the same as the daemon being ready to accept connections; on a slow host Electron will race DBus startup and either crash or behave erratically without this check.
-- Registers the Chromium launcher (the wrapper described in the Dockerfile section, not the system `chromium.desktop`) as the system default browser via `xdg-settings set default-web-browser chromium-launcher.desktop`. This ensures that when Claude Desktop hands off the OAuth login URL, the browser that opens is the one configured to run cleanly as root in our container. The call is wrapped in an `if ! …; then echo WARNING …` guard so that a non-zero exit (xdg-settings' verification step occasionally trips on unexpected `.config` state) logs loudly but does not abort the script under `set -eu` — the app is still usable for non-OAuth flows, and a hard failure here would silently crash-loop the program.
+- Registers the Chrome launcher (the wrapper described in the Dockerfile section, not Google Chrome's stock `.desktop`) as the system default browser via `xdg-settings set default-web-browser chrome-launcher.desktop`. This ensures that when Claude Desktop hands off the OAuth login URL, the browser that opens is the one configured to run cleanly as root in our container. The call is wrapped in an `if ! …; then echo WARNING …` guard so that a non-zero exit (xdg-settings' verification step occasionally trips on unexpected `.config` state) logs loudly but does not abort the script under `set -eu` — the app is still usable for non-OAuth flows, and a hard failure here would silently crash-loop the program.
 - Execs `claude-desktop` with the full container-safe flag set: `--no-sandbox --password-store=basic --disable-gpu --use-gl=swiftshader --disable-dev-shm-usage`. We assume the aaddrick `.deb` installs the binary as `claude-desktop` on `PATH` — that is the standard install layout for the upstream package. If a future upstream change renames the binary, the wrapper updates here. `--no-sandbox` is necessary because Chromium's built-in sandbox does not work cleanly in this container shape (the container itself is the isolation boundary, per Section 1). `--password-store=basic` is necessary because Electron will otherwise try to use libsecret for credential storage; with `libsecret-1-0` installed but no functioning DBus secret service (no gnome-keyring, no kwallet, no `pass`), Electron will hang or error during token storage. The GPU flags route rendering through SwiftShader since the container has no GPU. `--disable-dev-shm-usage` belt-and-suspenders alongside compose `shm_size: 1g`. `--remote-debugging-port` is deliberately **not** passed — see Section 4 for the discovered argv gate, and for the runtime SIGUSR1 / Node inspector workaround that the eventual test harness will use instead.
 
 Comments at the top of the file explain why each step exists, in the same spirit as the Dockerfile.
@@ -272,7 +279,7 @@ We will write these files in roughly the following order, validating the running
 
 1. **Stub container with the display stack only.** Write a minimal `Dockerfile`, `docker-compose.yml`, and `supervisord.conf` that bring up Xvfb, fluxbox, and x11vnc — no Claude Desktop yet. Confirm we can `docker compose up`, VNC into `localhost:5901`, and see an empty fluxbox session. This proves the headless display plumbing works in isolation, before we add the application that historically makes such setups hard.
 2. **Add Claude Desktop and the launch wrapper.** Add the `.deb` install, the Electron runtime dependency packages, the session DBus, the fonts, and `start-claude.sh`. Confirm we can VNC in and see the Claude window render. With the defensive flags pre-committed in Section 5 (`--no-sandbox`, `--password-store=basic`, `--disable-gpu`, `--use-gl=swiftshader`, `--disable-dev-shm-usage`), the audio null device, and the `claude://` mime registration all baked into the image at build time, the failure modes that previously dominated this step are pre-empted. Anything that still goes wrong here is something genuinely unanticipated — an aaddrick-port-specific quirk, an upstream library that was renamed, or a new Electron behavior. Each such failure is fixed at this step with a comment recording the symptom; the fix is also written back into Section 5 so the doc remains the source of truth.
-3. **Add the OAuth handoff and the clipboard bridge.** Add Chromium, register it as the default browser in the wrapper, and add `xclip` plus the x11vnc clipboard flag. Confirm we can paste credentials in via the VNC clipboard and complete a login.
+3. **Add the OAuth handoff and the clipboard bridge.** Add Google Chrome (from Google's apt repo), register the chrome-launcher wrapper as the default browser, and add `xclip` plus x11vnc clipboard support. Confirm we can paste credentials in via the VNC clipboard and complete a login.
 4. **Confirm a remote MCP works end-to-end.** Connect Claude to a remote MCP server and exercise it interactively. This closes out the success criteria from Section 0.
 5. **Finalize comments, write the README, add the dotfiles.** Confirm a fresh `docker compose down && docker compose up --build` reproduces the working container without manual fix-up.
 
@@ -292,7 +299,9 @@ The following are deliberate choices, not oversights. Each is acceptable under t
 
 **Running as root inside the container.** The container does not create or switch to a non-root user. Combined with `--no-sandbox`, anything the Electron process does runs with root privileges inside the container. We accept this because the container is itself the isolation boundary and the only network surface it exposes is the localhost-bound VNC port.
 
-**`--no-sandbox` for Chromium, in two places.** Chromium's built-in sandboxing does not work cleanly inside this container shape. We pass `--no-sandbox` to the Electron app at launch and also to the standalone Chromium browser used for OAuth handoff (via the launcher wrapper described in Section 3). Disabling the sandbox removes a defense-in-depth layer that exists in a normal install of either app. We accept this for the same reason as running as root: the container itself is what isolates these processes from the host. Chromium additionally refuses to start as root without `--no-sandbox`, so for the OAuth handoff browser, the flag is not optional even on top of the security argument.
+**`--no-sandbox` in two places.** Chromium-based sandboxing does not work cleanly inside this container shape. We pass `--no-sandbox` to the Electron app at launch and also to Google Chrome stable used for OAuth handoff (via the launcher wrapper described in Section 3). Disabling the sandbox removes a defense-in-depth layer that exists in a normal install of either app. We accept this for the same reason as running as root: the container itself is what isolates these processes from the host. Chrome additionally refuses to start as root without `--no-sandbox`, so for the OAuth handoff browser, the flag is not optional even on top of the security argument.
+
+**Third-party apt repository for Google Chrome.** The OAuth handoff browser is `google-chrome-stable`, installed from Google's official apt repo at `https://dl.google.com/linux/chrome/deb/`. This adds a third-party apt source and a proprietary binary to the image. We accept this because Ubuntu 22.04's `apt install chromium` is a snap-redirect stub that does not work in Docker (snapd is not running inside the container), and Chrome is the most reputable alternative that actually ships a real `.deb`. The signing key is fetched once at build time, dearmored into `/usr/share/keyrings/google-chrome.gpg`, and the source list line uses `[signed-by=...]` so the key's trust scope is limited to this single repo — a misissued key would not be trusted for any other apt source. The browser's only role inside the container is round-tripping the OAuth login redirect to `claude.ai` and back; no sensitive state lives in it across runs because the container has no persistent volumes. If a future need to avoid proprietary code in the image arises, the chromium PPA route is an alternative we have not pursued because the trade is worse for our use case.
 
 **No VNC password.** `x11vnc` runs without authentication. Combined with the localhost-only port binding, anyone with shell access to the host can connect to a logged-in Claude Desktop session. On a single-user developer workstation this is acceptable; on any shared host it would not be. The compose file's port binding is the safety, not the absence of a password. If a future user changes that binding to expose VNC beyond localhost without also adding a password, they are creating real exposure — this risk transfer is intentional and is called out in the README.
 
@@ -300,7 +309,7 @@ The following are deliberate choices, not oversights. Each is acceptable under t
 
 **Forceful shutdown of Electron on `docker compose down`.** Docker's default ten-second grace period before SIGKILL may not be enough for Electron to flush cleanly. We are not bumping `stop_grace_period`. The usual concern this raises is profile corruption on the next run; we accept the risk because the PoC is hermetic — there is no persistent profile to corrupt, since each run starts from a fresh container with no mounted volumes. If and when persistence is added, this decision must be revisited.
 
-**GPU and rendering flags pre-committed.** We launch Claude Desktop and the standalone Chromium handoff browser with `--disable-gpu`, `--use-gl=swiftshader`, and `--disable-dev-shm-usage` defensively, alongside `--no-sandbox` and `--password-store=basic`. These flags address standard Electron-in-container failure modes — GL initialization spins, GBM errors, black windows, shared-memory exhaustion. The container has no GPU, so disabling GPU acceleration and using the SwiftShader software renderer is correct on its own merits, not just defensive. We accept that one or more of these flags may be unnecessary for the specific aaddrick build we are pinning; the cost of an unnecessary flag is zero, and the value of avoiding a failed first build is substantial.
+**GPU and rendering flags pre-committed.** We launch Claude Desktop and the standalone Chrome handoff browser with `--disable-gpu`, `--use-gl=swiftshader`, and `--disable-dev-shm-usage` defensively, alongside `--no-sandbox` and `--password-store=basic`. These flags address standard Electron-in-container failure modes — GL initialization spins, GBM errors, black windows, shared-memory exhaustion. The container has no GPU, so disabling GPU acceleration and using the SwiftShader software renderer is correct on its own merits, not just defensive. We accept that one or more of these flags may be unnecessary for the specific aaddrick build we are pinning; the cost of an unnecessary flag is zero, and the value of avoiding a failed first build is substantial.
 
 **Both `shm_size: 1g` and `--disable-dev-shm-usage`.** Chromium's shared-memory needs can be addressed by bumping `/dev/shm` at the compose level or by telling Electron to fall back to disk-backed IPC. We do both: `shm_size: 1g` for performance when shared memory is healthy, and `--disable-dev-shm-usage` as a belt-and-suspenders fallback. The cost of the redundancy is negligible.
 
@@ -330,7 +339,7 @@ Implication for this PoC: nothing changes today. Section 0's success criterion i
 
 **Apple Silicon performance penalty, with documented fallback to GCP.** The aaddrick port ships an amd64 `.deb`. On Apple Silicon hosts, Docker Desktop runs amd64 images under emulation, which is substantially slower than native execution and has a reputation for flakiness in Electron's GPU and IPC paths in particular. We are pinning the image to `linux/amd64` in the Dockerfile and accepting the performance hit for now — prior experience with headless Chromium under emulation suggests this will work, even if not quickly. If emulation turns out to be too slow or too unstable to satisfy the success criteria on M-series hardware, the documented fallback is to run this PoC on a GCP Linux instance, which is amd64 natively. We are not investing in producing an arm64 build of the aaddrick port; that is out of scope for this PoC.
 
-**Passkey-only Anthropic logins are unsupported.** The login flow assumes the engineer attempting it has a TOTP-based second factor available. Passkey and platform-authenticator (WebAuthn) flows do not work over VNC — the underlying authenticator assertions cannot reach the host's authenticator from inside a remote Chromium session. If an engineer's Anthropic account is configured for passkey-only authentication, they will need to use a TOTP-enabled account to validate the success criteria. We accept this as a deliberate limit of the PoC; broadening it is not in scope.
+**Passkey-only Anthropic logins are unsupported.** The login flow assumes the engineer attempting it has a TOTP-based second factor available. Passkey and platform-authenticator (WebAuthn) flows do not work over VNC — the underlying authenticator assertions cannot reach the host's authenticator from inside a remote in-container browser session. If an engineer's Anthropic account is configured for passkey-only authentication, they will need to use a TOTP-enabled account to validate the success criteria. We accept this as a deliberate limit of the PoC; broadening it is not in scope.
 
 **OAuth callback: `claude://` pre-registered defensively.** Anthropic's OAuth flow may complete via a `claude://` custom URL scheme (in which case the OS routes the callback back to Claude Desktop via xdg-mime registration) or via a localhost callback URL. Rather than wait to find out empirically, the Dockerfile runs `xdg-mime default claude-desktop.desktop x-scheme-handler/claude || true` after the `.deb` install. If the aaddrick `.deb` already registers the handler, our command is redundant; if not, our command provides it. The `|| true` tolerates the case where the `.deb` installs a differently-named `.desktop` file (in which event the original failure mode would be visible in build logs as a non-fatal warning, not a runtime mystery). If the OAuth flow uses a localhost callback URL instead of the custom scheme, the registration is harmless. This eliminates "OAuth window closes and nothing happens" as a runtime failure mode.
 
@@ -348,7 +357,7 @@ This section is the implementation. Sections 0–4 explain why each decision was
 #
 # Pinned to amd64 because the aaddrick .deb ships amd64 only.
 # On Apple Silicon hosts this runs under Docker Desktop's amd64 emulation.
-FROM --platform=linux/amd64 debian:bookworm-slim
+FROM --platform=linux/amd64 ubuntu:22.04
 
 # .deb pin: aaddrick release v2.0.10+claude1.6259.0, pinned 2026-05-06.
 # To update: visit https://github.com/aaddrick/claude-desktop-debian/releases,
@@ -357,6 +366,8 @@ ARG CLAUDE_DEB_URL=https://github.com/aaddrick/claude-desktop-debian/releases/do
 ARG CLAUDE_DEB_SHA256=04e1e5c4c89b09bdfd82b9ea6a1a7a26127b34bc5f94de68b62ad47aafa63d1b
 
 # System packages, in commented groups so the purpose of each is obvious.
+# DEBIAN_FRONTEND keeps tzdata and friends from prompting interactively.
+ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         # Headless display stack
         xvfb \
@@ -375,9 +386,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libsecret-1-0 \
         libxss1 \
         libxtst6 \
-        # OAuth handoff browser
-        chromium \
+        # OAuth handoff browser support (Chrome itself installed in the next
+        # RUN block from Google's apt repo — Ubuntu's `chromium` is a snap
+        # redirect that does not work in Docker).
         xdg-utils \
+        gnupg \
         # Clipboard bridge (X11 selection ownership)
         xclip \
         # Fonts so menus and chat bubbles do not render as blank rectangles
@@ -397,11 +410,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         x11-utils \
     && rm -rf /var/lib/apt/lists/*
 
+# Google Chrome stable, the OAuth handoff browser.
+# Key dearmored into /usr/share/keyrings/ and the source list line uses
+# [signed-by=...] so this key is scoped to this single repo (a misissued
+# key would not be trusted for any other apt source). The `command -v`
+# check fails the build if Google ever renames the binary.
+RUN curl -fsSL https://dl.google.com/linux/linux_signing_key.pub \
+        | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \
+    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" \
+        > /etc/apt/sources.list.d/google-chrome.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends google-chrome-stable \
+    && rm -rf /var/lib/apt/lists/* \
+    && command -v google-chrome-stable
+
 # Generate en_US.UTF-8 so Electron's Intl machinery has a real locale to read.
 RUN sed -i 's/^# *en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen && locale-gen
 ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 
-# HOME is read by Electron, Chromium, and xdg-settings; supervisord under root
+# HOME is read by Electron, Chrome, and xdg-settings; supervisord under root
 # does not always propagate it. ENV here gives every process a baseline.
 ENV HOME=/root
 
@@ -426,13 +453,13 @@ RUN curl -fsSL "$CLAUDE_DEB_URL" -o /tmp/claude-desktop.deb \
 # .deb installing a differently-named .desktop file.
 RUN xdg-mime default claude-desktop.desktop x-scheme-handler/claude || true
 
-# Chromium launcher wrapper. Chromium refuses to start as root without
+# Chrome launcher wrapper. Chrome refuses to start as root without
 # --no-sandbox; --password-store=basic avoids libsecret hangs (no DBus
 # secret service in the container); the GPU/IPC flags match start-claude.sh
 # so the OAuth browser shares the same container-safe baseline.
-RUN cat > /usr/local/bin/chromium-launcher <<'SCRIPT'
+RUN cat > /usr/local/bin/chrome-launcher <<'SCRIPT'
 #!/bin/sh
-exec /usr/bin/chromium \
+exec /usr/bin/google-chrome-stable \
     --no-sandbox \
     --password-store=basic \
     --disable-gpu \
@@ -440,24 +467,24 @@ exec /usr/bin/chromium \
     --disable-dev-shm-usage \
     "$@"
 SCRIPT
-RUN chmod +x /usr/local/bin/chromium-launcher
+RUN chmod +x /usr/local/bin/chrome-launcher
 
 # Custom .desktop file pointing at our launcher. start-claude.sh registers
 # this as the default browser at runtime.
-RUN cat > /usr/share/applications/chromium-launcher.desktop <<'DESKTOP'
+RUN cat > /usr/share/applications/chrome-launcher.desktop <<'DESKTOP'
 [Desktop Entry]
 Version=1.0
 Type=Application
-Name=Chromium (container-safe)
-Exec=/usr/local/bin/chromium-launcher %U
+Name=Google Chrome (container-safe)
+Exec=/usr/local/bin/chrome-launcher %U
 Terminal=false
 Categories=Network;WebBrowser;
 MimeType=text/html;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
 DESKTOP
 
-# Our supervisord config overwrites the stock Debian top-level config rather
-# than dropping a fragment into conf.d/. This makes the CMD path unambiguous
-# and removes our dependency on the stock config's conf.d/*.conf include.
+# Our supervisord config overwrites the stock top-level config rather than
+# dropping a fragment into conf.d/. This makes the CMD path unambiguous and
+# removes our dependency on the stock config's conf.d/*.conf include.
 COPY supervisord.conf /etc/supervisor/supervisord.conf
 COPY start-claude.sh /usr/local/bin/start-claude.sh
 RUN chmod +x /usr/local/bin/start-claude.sh
@@ -497,8 +524,8 @@ services:
 ### `supervisord.conf`
 
 ```ini
-; Self-contained supervisord config. Overwrites the stock Debian top-level
-; config; we do not rely on conf.d/*.conf include behavior.
+; Self-contained supervisord config. Overwrites the stock top-level config;
+; we do not rely on conf.d/*.conf include behavior.
 
 [unix_http_server]
 file=/var/run/supervisor.sock
@@ -618,12 +645,12 @@ while ! dbus-send --session --dest=org.freedesktop.DBus --type=method_call \
     sleep 0.5
 done
 
-# Register our container-safe Chromium launcher (not the system Chromium) as
+# Register our container-safe Chrome launcher (not the system Chrome) as
 # the default browser. This is what Claude Desktop's xdg-open call invokes
 # during the OAuth login flow. Tolerate non-zero exit under `set -eu`: a
 # verification failure here should log loudly but not prevent Claude from
 # launching, since the app is still usable for non-OAuth flows.
-if ! xdg-settings set default-web-browser chromium-launcher.desktop; then
+if ! xdg-settings set default-web-browser chrome-launcher.desktop; then
     echo "WARNING: xdg-settings failed to set default browser; OAuth handoff may not work" >&2
 fi
 

@@ -33,12 +33,12 @@ while ! dbus-send --session --dest=org.freedesktop.DBus --type=method_call \
     sleep 0.5
 done
 
-# Register our container-safe Chromium launcher (not the system Chromium) as
+# Register our container-safe Chrome launcher (not the system Chrome) as
 # the default browser. This is what Claude Desktop's xdg-open call invokes
 # during the OAuth login flow. Tolerate non-zero exit under `set -eu`: a
 # verification failure here should log loudly but not prevent Claude from
 # launching, since the app is still usable for non-OAuth flows.
-if ! xdg-settings set default-web-browser chromium-launcher.desktop; then
+if ! xdg-settings set default-web-browser chrome-launcher.desktop; then
     echo "WARNING: xdg-settings failed to set default browser; OAuth handoff may not work" >&2
 fi
 
