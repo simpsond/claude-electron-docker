@@ -1,0 +1,8 @@
+.git
+.gitignore
+.dockerignore
+DESIGN.md
+README.md
+.DS_Store
+*.swp
+*.swo

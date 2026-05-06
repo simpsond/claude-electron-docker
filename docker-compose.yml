@@ -1,0 +1,22 @@
+services:
+  claude-desktop:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: claude-desktop-poc:latest
+    container_name: claude-desktop
+    # tini at PID 1, supervisord at PID 2. Cleanly handles SIGTERM forwarding
+    # and zombie reaping; removes a class of weird-shutdown bugs.
+    init: true
+    # Chromium's renderer crashes with the default 64 MiB /dev/shm.
+    shm_size: 1g
+    # Electron with Chromium plus Claude can comfortably use 2 GiB; cap at 4 GiB
+    # so a runaway leak fails fast on Docker Desktop for Mac instead of grinding
+    # the host VM.
+    mem_limit: 4g
+    ports:
+      # Localhost-only on purpose. VNC runs without a password; do not change
+      # this binding without also adding authentication.
+      - "127.0.0.1:5901:5901"
+    # No volumes — hermetic per run.
+    # No environment overrides — defaults baked into the image.
